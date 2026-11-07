@@ -14,6 +14,14 @@ void readLevel(uint8_t sign,int count){
 }
 int main(){
  input[BUTTON]=HIGH;adcInput[HANDLE]=500;setup();
+ // Verified physical wiring: U=A1, V=A2, W=A3; free phases W,V,U,W,V,U.
+ assert(PHASE[0]==1&&PHASE[1]==2&&PHASE[2]==3);
+ const uint8_t expectedMux[6]={3,2,1,3,2,1};
+ for(uint8_t i=0;i<6;i++){
+  vectorIndex=i;sensingMode();assert((ADMUX&15)==expectedMux[i]);
+  assert(!(ADCSRA&_BV(ADEN))&&(ADCSRB&_BV(ACME)));
+ }
+
  prepare();readLevel(0,20);assert(initialSign);
  clockUs=startedUs+10000;readLevel(1,5);assert(crossingFound);saveSense();
  auto r=senseLog[(senseHead+SENSE_ROWS-1)%SENSE_ROWS];
