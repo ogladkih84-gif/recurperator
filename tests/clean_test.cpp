@@ -16,6 +16,7 @@ void simulate(uint64_t length,bool signal=true){
  }
 }
 int main(){
+ assert(FINAL_SECTOR_US==20000);
  input[BUTTON]=HIGH;adcInput[HANDLE]=1000;setup();start();assert(mode==IDLE&&!zeroSeen);
  adcInput[HANDLE]=0;readHandle();assert(zeroSeen);
  adcInput[HANDLE]=500;start();assert(mode==POSITION);
@@ -32,6 +33,8 @@ int main(){
  adcInput[HANDLE]=0;simulate(100000);assert(mode==COAST);safe();
  simulate(COAST_MS*1000ULL+10000);adcInput[HANDLE]=500;start();simulate(12000000,false);
  assert(mode==COAST&&errorCode==6);safe();
+ assert(Serial.log.find("Конечный сектор, мкс=20000")!=std::string::npos);
+ assert(Serial.log.find("Разгон мкс=")!=std::string::npos);
  // Diagnostic steps must run with the comparator disabled and stop on their own.
  adcInput[HANDLE]=0;simulate(COAST_MS*1000ULL+10000);
  adcInput[HANDLE]=500;Serial.rx="j";loop();assert(mode==POSITION&&launchType==2);
@@ -39,7 +42,8 @@ int main(){
  // Open-loop test must accelerate and stop without demanding any BEMF signal.
  adcInput[HANDLE]=0;simulate(COAST_MS*1000ULL+10000);
  adcInput[HANDLE]=500;Serial.rx="o";loop();assert(mode==POSITION&&launchType==1);
- simulate(15000000,false);assert(mode==COAST&&errorCode==0&&!comparatorActive&&goodTotal==0);safe();
+ simulate(9000000,false);assert(mode==TEST_RUN&&sectorUs==20000&&errorCode==0&&!comparatorActive);
+ simulate(3000000,false);assert(mode==COAST&&errorCode==0&&!comparatorActive&&goodTotal==0);safe();
  adcInput[HANDLE]=0;simulate(COAST_MS*1000ULL+10000);
  assert(startupPwm==54);Serial.rx="+";loop();assert(startupPwm==60&&mode==IDLE);
  for(int i=0;i<20;i++){Serial.rx="+";loop();}assert(startupPwm==90);

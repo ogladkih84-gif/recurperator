@@ -52,6 +52,7 @@ inline void analogReference(int){}
 inline long map(long x,long a,long b,long c,long d){return (x-a)*(d-c)/(b-a)+c;}
 struct SerialMock {
   std::string log,rx;
+  int availableForWrite(){return 64;}
   void begin(int){} int available(){return rx.size();} char read(){char c=rx.front();rx.erase(0,1);return c;}
   void print(const char *v){log+=v;}
   void print(char v){log+=v;}
