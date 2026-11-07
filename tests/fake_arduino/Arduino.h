@@ -17,7 +17,7 @@ using uint8_t=std::uint8_t; using uint16_t=std::uint16_t; using uint32_t=std::ui
 #define DEFAULT 1
 #define F(x) x
 #define _BV(x) (1<<(x))
-enum { WGM10, CS10, WGM20, CS20 };
+enum { WGM10=0, CS10=0, WGM20=0, CS20=0, CS11=1, CS21=1 };
 inline uint8_t TCCR1A,TCCR1B,TCCR2A,TCCR2B;
 inline uint16_t OCR1A,OCR1B,OCR2A;
 inline uint8_t ACSR,ADCSRA,ADCSRB,ADMUX,DIDR1,PINB;
