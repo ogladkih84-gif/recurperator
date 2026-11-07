@@ -19,6 +19,6 @@ if errorlevel 1 (
     exit /b 1
   )
 )
-echo Осциллограф должен хранить нужную запись в STOP. Закройте Ultra Sigma перед выгрузкой.
+echo Осциллограф должен хранить запись CH2, CH3, CH4 в STOP. Закройте Ultra Sigma перед выгрузкой.
 py -3 rigol_export.py %*
 pause

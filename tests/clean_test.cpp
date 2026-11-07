@@ -1,23 +1,8 @@
-#include <cassert>
-#include <iostream>
-#include "../firmware/NanoBldcClean/NanoBldcClean.ino"
-void safe(){
- for(int i=0;i<3;i++)assert(!(output[TOP[i]]&&output[BOTTOM[i]]));
- if(mode==IDLE||mode==COAST)for(int i=0;i<3;i++)assert(!output[TOP[i]]&&!output[BOTTOM[i]]);
-}
-void simulate(uint64_t length,bool signal=true){
- auto end=clockUs+length;
- while(clockUs<end){
-  uint8_t after=((vectorIndex&1)?0:1)^(direction<0)^invert;
-  bool late=uint32_t(micros()-startedUs)>=sectorUs/2;
-  uint8_t sign=(signal&&late)?after:after^1;
-  ACSR=(ACSR&~_BV(ACO))|(sign?_BV(ACO):0);
-  TCNT1L=TCNT2=0;loop();safe();clockUs+=20;
- }
-}
+#include "handover_model.h"
+void simulate(uint64_t length,bool signal=true){sendCrossings=signal;run(length);}
 int main(){
  assert(FINAL_SECTOR_US==20000);
- input[BUTTON]=HIGH;adcInput[HANDLE]=1000;setup();start();assert(mode==IDLE&&!zeroSeen);
+ input[BUTTON]=HIGH;adcInput[HANDLE]=1000;adcHook=adcMotor;setup();start();assert(mode==IDLE&&!zeroSeen);
  adcInput[HANDLE]=0;readHandle();assert(zeroSeen);
  adcInput[HANDLE]=500;start();assert(mode==POSITION);
  simulate(12000000);assert(mode==FOLLOW&&confidence>=CLEAN_SECTORS&&goodTotal>10);
@@ -29,10 +14,10 @@ int main(){
  adcInput[HANDLE]=600;start();assert(mode==POSITION);
  reverseRequest();assert(mode==COAST&&direction==-1);safe();
  adcInput[HANDLE]=0;simulate(COAST_MS*1000ULL+10000);
- adcInput[HANDLE]=500;start();simulate(12000000);assert(mode==FOLLOW&&direction==-1);
+ adcInput[HANDLE]=500;motorSign=direction;start();simulate(12000000);assert(mode==FOLLOW&&direction==-1);
  adcInput[HANDLE]=0;simulate(100000);assert(mode==COAST);safe();
- simulate(COAST_MS*1000ULL+10000);adcInput[HANDLE]=500;start();simulate(23000000,false);
- assert(mode==COAST&&errorCode==6);safe();
+ simulate(COAST_MS*1000ULL+10000);adcInput[HANDLE]=500;start();simulate(8000000,false);
+ assert(mode==COAST&&errorCode==2);safe();
  assert(Serial.log.find("Конечный сектор, мкс=20000")!=std::string::npos);
  assert(Serial.log.find("Разгон мкс=")!=std::string::npos);
  // Diagnostic steps must run with the comparator disabled and stop on their own.

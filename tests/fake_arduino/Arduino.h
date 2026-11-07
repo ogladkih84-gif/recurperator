@@ -53,7 +53,8 @@ inline void analogWrite(int p,int v){
  if(bit>=0){if(v)PINB|=1<<bit;else PINB&=~(1<<bit);}
 }
 inline int digitalRead(int p){return input[p];}
-inline int analogRead(int p){clockUs+=104;return adcInput[p];}
+inline int (*adcHook)(int)=nullptr;
+inline int analogRead(int p){clockUs+=adcHook?26:104;return adcHook?adcHook(p):adcInput[p];}
 inline void analogReference(int){}
 inline long map(long x,long a,long b,long c,long d){return (x-a)*(d-c)/(b-a)+c;}
 struct SerialMock {

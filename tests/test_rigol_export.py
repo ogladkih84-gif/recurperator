@@ -4,6 +4,9 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
+import json
 
 MODULE = Path(__file__).resolve().parents[1] / 'scripts/rigol_export.py'
 spec = importlib.util.spec_from_file_location('rigol_export', MODULE)
@@ -15,17 +18,24 @@ class Scope:
         self.total, self.channel, self.first, self.last = total, 3, 1, total
         self.blocks, self.commands = [], []
         self.truncate = False
+        self.enabled = {2,3,4}
+        self.closed = False
     def write(self, command):
         self.commands.append(command)
         if command.startswith(':WAV:SOUR '): self.channel = int(command[-1])
         elif command.startswith(':WAV:STAR '): self.first = int(command.split()[-1])
         elif command.startswith(':WAV:STOP '): self.last = int(command.split()[-1])
     def query(self, command):
+        if command == '*IDN?': return 'RIGOL TECHNOLOGIES,DS1104Z,example,00.04.04.SP4'
+        if command == '*OPC?': return '1'
+        if command == ':TRIG:STAT?': return 'STOP'
+        if command.startswith(':CHAN') and command.endswith(':DISP?'): return '1' if int(command[5]) in self.enabled else '0'
         if command == ':ACQ:MDEP?': return str(self.total)
         if command == ':WAV:PRE?':
-            yinc, yorigin, yref = (.02, 7, 128) if self.channel == 3 else (.01, 3, 120)
+            yinc, yorigin, yref = {2:(.05,11,90),3:(.02,7,128),4:(.01,3,120)}[self.channel]
             return f'0,2,{self.total},1,0.000001,-0.12,10,{yinc},{yorigin},{yref}'
         raise AssertionError(command)
+    def close(self): self.closed=True
     def query_binary_values(self, command, **kwargs):
         assert command == ':WAV:DATA?' and kwargs['datatype'] == 'B'
         assert 1 <= self.first <= self.last <= self.total
@@ -56,6 +66,55 @@ class ExportTests(unittest.TestCase):
                 self.assertAlmostEqual(float(first['ch3_V']),(100-7-128)*.02)
                 self.assertAlmostEqual(float(first['ch4_V']),(100-3-120)*.01)
                 self.assertAlmostEqual(float(first['ch3_minus_ch4_V']),-.47)
+    def test_three_channels_and_different_scaling(self):
+        scope=Scope()
+        captures=export.read_channels(scope,[2,3,4])
+        self.assertEqual(set(captures),{2,3,4})
+        self.assertEqual(len(scope.blocks),9)
+        self.assertEqual(captures[2][0],bytes((i*4+100)%256 for i in range(0,scope.total,3)))
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'capture.csv'
+            export.write_channels(path,captures)
+            with path.open() as f:
+                rows=csv.DictReader(f)
+                self.assertEqual(rows.fieldnames,['time_s','ch2_V','ch3_V','ch4_V','ch3_minus_ch4_V'])
+                row=next(rows)
+                self.assertAlmostEqual(float(row['ch2_V']),-.05)
+                self.assertAlmostEqual(float(row['ch3_V']),-.7)
+                self.assertAlmostEqual(float(row['ch4_V']),-.23)
+                self.assertAlmostEqual(float(row['ch3_minus_ch4_V']),-.47)
+                self.assertEqual(sum(1 for _ in rows)+1,150041)
+    def test_disabled_channel_not_enabled_automatically(self):
+        scope=Scope(6000);scope.enabled={3,4}
+        with self.assertRaisesRegex(ValueError,'CH2 выключен'):
+            export.read_channels(scope,[2,3,4])
+        self.assertEqual(scope.commands,[])
+        self.assertEqual(scope.blocks,[])
+        self.assertEqual(set(export.read_channels(scope,[3,4])),{3,4})
+    def test_ch2_time_mismatch_rejected(self):
+        scope=Scope(6000);captures=export.read_channels(scope,[2,3,4])
+        captures[2][1]['preamble']['xorigin']+=.01
+        with self.assertRaisesRegex(ValueError,'Начало времени'):
+            export.write_channels('/unused.csv',captures)
+    def test_main_default_three_and_legacy_two_channels(self):
+        for channels in ([2,3,4],[3,4]):
+            scope=Scope(6000)
+            manager=SimpleNamespace(list_resources=lambda pattern:['USB0::MOCK::INSTR'],
+                                    open_resource=lambda address:scope,close=lambda:None)
+            module=SimpleNamespace(ResourceManager=lambda *args:manager)
+            with tempfile.TemporaryDirectory() as folder,patch.dict('sys.modules',{'pyvisa':module}):
+                path=Path(folder)/'out'
+                argv=['--output',str(path),'--max-points','2000']
+                if channels==[3,4]:argv+=['--channels','3','4']
+                self.assertEqual(export.main(argv),0)
+                name='rigol_'+'_'.join('ch'+str(n) for n in channels)+'.csv'
+                self.assertTrue((path/name).is_file())
+                meta=json.loads((path/'metadata.json').read_text())
+                self.assertEqual(meta['channels'],channels)
+                self.assertEqual(meta['rows'],2000)
+                self.assertEqual('ch2' in meta,2 in channels)
+                self.assertTrue(scope.closed)
+                self.assertFalse(any(c in scope.commands for c in (':RUN',':AUT',':CHAN2:DISP ON')))
     def test_truncated_transfer_rejected(self):
         scope=Scope(10000);scope.truncate=True
         with self.assertRaisesRegex(ValueError,'байт вместо'):

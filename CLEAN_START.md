@@ -1,3 +1,5 @@
+**Актуальная редакция меняет передачу управления: см. [HANDOVER.md](HANDOVER.md). Ниже сохранена история предыдущего алгоритма и диагностики.**
+
 # Новый скетч с нуля: NanoBldcClean
 
 [Открыть скетч](firmware/NanoBldcClean/NanoBldcClean.ino).
