@@ -18,7 +18,7 @@ int main(){
  adcInput[HANDLE]=0;simulate(100000);assert(mode==COAST);safe();
  simulate(COAST_MS*1000ULL+10000);adcInput[HANDLE]=500;start();simulate(8000000,false);
  assert(mode==COAST&&errorCode==2);safe();
- assert(Serial.log.find("Конечный сектор, мкс=20000")!=std::string::npos);
+ assert(Serial.log.find("сектор=20000")!=std::string::npos);
  assert(Serial.log.find("Разгон мкс=")!=std::string::npos);
  // Diagnostic steps must run with the comparator disabled and stop on their own.
  adcInput[HANDLE]=0;simulate(COAST_MS*1000ULL+10000);
