@@ -23,6 +23,11 @@ int main(){
  r=senseLog[(senseHead+SENSE_ROWS-1)%SENSE_ROWS];assert(r.ones==r.samples&&r.samples>0&&(r.flags&4));
  prepare();TCNT1L=TCNT2=pwm;readLevel(0,30);saveSense();
  r=senseLog[(senseHead+SENSE_ROWS-1)%SENSE_ROWS];assert(r.tries>0&&r.samples==0);
+ // A timer initially outside the plateau must be followed until a valid plateau.
+ prepare();TCNT1L=80;TCNT1L.reads=0;TCNT1L.step=5;uint8_t raw;assert(sampleSign(raw));
+ assert(TCNT1L.reads>2);TCNT1L.step=0;TCNT1L=0;
+ // A static invalid plateau must return after exactly 32 paired snapshots.
+ TCNT1L=pwm;TCNT1L.reads=0;assert(!sampleSign(raw));assert(TCNT1L.reads==64);TCNT1L=0;
  prepare();ADCSRA|=_BV(ADEN);readLevel(0,5);saveSense();
  r=senseLog[(senseHead+SENSE_ROWS-1)%SENSE_ROWS];assert(r.flags&32);
  for(int i=0;i<30;i++){prepare();readLevel(0,5);saveSense();}assert(senseCount==SENSE_ROWS);

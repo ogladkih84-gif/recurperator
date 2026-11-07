@@ -20,7 +20,13 @@ using uint8_t=std::uint8_t; using uint16_t=std::uint16_t; using uint32_t=std::ui
 enum { WGM10, CS10, WGM20, CS20 };
 inline uint8_t TCCR1A,TCCR1B,TCCR2A,TCCR2B;
 inline uint16_t OCR1A,OCR1B,OCR2A;
-inline uint8_t ACSR,ADCSRA,ADCSRB,ADMUX,DIDR1,TCNT2,TCNT1L,PINB;
+inline uint8_t ACSR,ADCSRA,ADCSRB,ADMUX,DIDR1,PINB;
+struct ModelTimer {
+ uint8_t value=0,step=0;unsigned reads=0;
+ ModelTimer& operator=(uint8_t v){value=v;return *this;}
+ operator uint8_t(){reads++;uint8_t previous=value;value+=step;return previous;}
+};
+inline ModelTimer TCNT2,TCNT1L;
 #define ACD 7
 #define ACI 4
 #define ACIE 3

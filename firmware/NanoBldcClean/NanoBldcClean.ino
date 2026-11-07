@@ -59,6 +59,7 @@ uint8_t coastCount=0; // Храним число готовых строк по�
 uint32_t coastOrigin=0,coastSampleDue=0,coastRowDue=0,coastRise=0,coastPeriod=0; // Храним временные метки выборок, строк и переходов ЭДС.
 uint16_t coastPeak=0; // Накапливаем максимальную абсолютную разность фазы У и нейтрали за текущий интервал.
 bool coastArmed=false,coastRiseKnown=false; // Требуем обе полярности сигнала перед регистрацией очередного полного периода.
+uint32_t senseBlankUs=0,senseWindowEndUs=0,senseBaseEndUs=0,senseCrossEarlyUs=0,senseCrossLateUs=0; // Вычисляем временные границы один раз на сектор вместо дорогого деления при каждой выборке.
 const uint8_t SENSE_ROWS=18; // Храним диагностику последних восемнадцати секторов без печати во время коммутации.
 struct SenseRecord{uint16_t tries,samples,ones,firstEdge;uint8_t sector,wanted,flags;}; // Разделяем отсутствие выборок, постоянный уровень и отбраковку перехода.
 SenseRecord senseLog[SENSE_ROWS],senseNow={}; // Выделяем небольшой кольцевой журнал и текущую запись.
@@ -145,7 +146,10 @@ void readHandle(){ // Объявляем чтение потенциометра
  handleMs=millis(); // Запоминаем время чтения ручки. 
  if(handleValue<=ZERO_HANDLE)zeroSeen=true; // Отмечаем явное возвращение ручки в ноль. 
 } // Завершаем чтение органа управления. 
-void clearDetector(){ // Объявляем очистку фильтра после смены силового вектора. 
+void clearDetector(){ // Объявляем очистку фильтра после смены силового вектора.
+ senseBlankUs=sectorUs/10;if(senseBlankUs<180)senseBlankUs=180;if(senseBlankUs>800)senseBlankUs=800; // Один раз рассчитываем прежнее время подавления переходных процессов.
+ senseWindowEndUs=sectorUs*4/5;senseBaseEndUs=sectorUs*2/5; // Один раз рассчитываем прежние границы наблюдения и начального уровня.
+ senseCrossEarlyUs=sectorUs/4;senseCrossLateUs=sectorUs*3/4; // Один раз рассчитываем прежнее допустимое окно пересечения ЭДС. 
  initialSign=false;crossingFound=false;candidateKnown=false;repeats=0; // Сбрасываем признаки текущего сектора, сохраняя историю периодов. 
  senseNow={};senseNow.sector=vectorIndex+1;senseNow.wanted=((vectorIndex&1)?0:1)^(direction<0)^invert; // Начинаем запись с номером сектора и ожидаемым знаком после пересечения.
  senseOpen=comparatorActive;sensePreviousKnown=false; // Включаем статистику только при действительном наблюдении компаратора.
@@ -177,21 +181,21 @@ uint32_t medianPeriod(){ // Объявляем медианный фильтр �
  if(a>b){t=a;a=b;b=t;} // Повторно упорядочиваем первую пару. 
  return b; // Возвращаем среднее по порядку значение без влияния одиночного выброса. 
 } // Завершаем медианный фильтр. 
-bool sampleSign(uint8_t &sign){ // Объявляем короткую выборку компаратора в устойчивой части включённого ШИМ. 
- uint8_t sink=DRIVE[vectorIndex][1],margin=pwm>28?pwm-28:0; // Определяем нижнюю фазу и отступ от фронтов примерно 1,75 микросекунды. 
- uint8_t before=sink==0?TCNT2:TCNT1L; // Читаем счётчик аппаратного таймера активной нижней фазы. 
- uint8_t status=ACSR,actual=PINB; // Немедленно читаем компаратор и реальное логическое состояние выходного порта. 
- uint8_t after=sink==0?TCNT2:TCNT1L; // Повторно читаем счётчик, чтобы отвергнуть выборку возле переключения. 
- uint8_t bit=sink==0?PB3:(sink==1?PB2:PB1); // Определяем бит порта для Д11, Д10 или Д9. 
- if(before>=margin||after>=margin||!(actual&_BV(bit)))return false; // Принимаем только выборку внутри включённого участка нижнего ключа. 
- sign=(status&_BV(ACO))?1:0;return true; // Возвращаем знак разности нейтрали и свободной фазы. 
-} // Завершаем получение знака ЭДС. 
+bool sampleSign(uint8_t &sign){ // Объявляем выборку с коротким ограниченным ожиданием устойчивой части ШИМ.
+ uint8_t sink=DRIVE[vectorIndex][1],margin=pwm>28?pwm-28:0; // Сохраняем прежний отступ от фронтов примерно 1,75 микросекунды.
+ uint8_t bit=sink==0?PB3:(sink==1?PB2:PB1); // Заранее определяем бит управляющего порта выбранного нижнего ключа.
+ for(uint8_t attempt=0;attempt<32;attempt++){ // Не более тридцати двух проверок ждём подходящее плато вместо одиночного случайного чтения.
+  uint8_t before=sink==0?TCNT2:TCNT1L; // Читаем счётчик активного аппаратного ШИМ непосредственно перед выборкой.
+  uint8_t status=ACSR,actual=PINB; // Сразу снимаем компаратор и фактический логический уровень управляющего выхода.
+  uint8_t after=sink==0?TCNT2:TCNT1L; // Проверяем, что во время чтения не приблизились к фронту ШИМ.
+  if(before<margin&&after<margin&&(actual&_BV(bit))){sign=(status&_BV(ACO))?1:0;return true;} // Принимаем только подтверждённое включённое плато с прежними критериями.
+ } // Завершаем ограниченное ожидание, сохраняя возможность обслужить остановку и сроки коммутации.
+ return false; // При отсутствии подходящего плато пропускаем выборку, не читая заведомо неподходящий сигнал.
+} // Завершаем получение знака ЭДС.
 void observeRotor(){ // Объявляем поиск пересечения ЭДС для текущего сектора. 
  if(!comparatorActive||crossingFound)return; // После принятого пересечения больше не ищем переходы в этом секторе. 
- uint32_t age=micros()-startedUs,blank=sectorUs/10; // Вычисляем возраст сектора и исходную длительность подавления помех. 
- if(blank<180)blank=180; // Ограничиваем минимальную длительность подавления помех. 
- if(blank>800)blank=800; // Ограничиваем максимальную длительность подавления помех. 
- if(age<blank||age>sectorUs*4/5)return; // Не рассматриваем переходные процессы и слишком поздние выборки. 
+ uint32_t age=micros()-startedUs; // Вычисляем только возраст сектора без повторного деления временных границ.
+ if(age<senseBlankUs||age>senseWindowEndUs)return; // Используем прежнее окно, заранее рассчитанное при коммутации.
  if(senseNow.tries<65535)senseNow.tries++; // Считаем попытки чтения до проверки допустимого плато ШИМ.
  if((ADCSRA&_BV(ADEN))||!(ADCSRB&_BV(ACME)))senseNow.flags|=32; // Отмечаем неправильное состояние АЦП или мультиплексора при наблюдении.
  uint8_t sign;if(!sampleSign(sign))return; // Получаем знак только при подходящем состоянии ШИМ. 
@@ -205,12 +209,12 @@ void observeRotor(){ // Объявляем поиск пересечения Э�
  if(repeats<3||now-candidateUs<SIGN_TIME_US)return; // Отбрасываем короткие всплески и случайные одиночные чтения. 
  uint8_t wanted=((vectorIndex&1)?0:1)^(direction<0)^invert; // Вычисляем ожидаемый знак после пересечения с учётом направления и настройки. 
  if(!initialSign){ // Сначала проверяем, что наблюдалась противоположная полярность. 
-  if(sign!=wanted&&now-startedUs<sectorUs*2/5)initialSign=true;else senseNow.flags|=4; // Принимаем исходный знак только до середины сектора. 
+  if(sign!=wanted&&now-startedUs<senseBaseEndUs)initialSign=true;else senseNow.flags|=4; // Принимаем исходный знак только до середины сектора. 
   return; // До подтверждения исходного знака не принимаем пересечение. 
  } // Завершаем проверку исходной полярности. 
  if(sign!=wanted)return; // Ждём перехода к ожидаемому знаку. 
  uint32_t at=candidateUs,offset=at-startedUs; // Используем первую выборку нового знака, компенсируя задержку подтверждения. 
- if(offset<sectorUs/4||offset>sectorUs*3/4){senseNow.flags|=8;return;} // Принимаем пересечение только в центральной половине сектора. 
+ if(offset<senseCrossEarlyUs||offset>senseCrossLateUs){senseNow.flags|=8;return;} // Принимаем пересечение только в центральной половине сектора. 
  if(previousCrossKnown){ // При наличии истории проверяем новый полный интервал между пересечениями. 
   uint32_t interval=at-lastCrossUs,reference=mode==FOLLOW?measuredUs:sectorUs; // Сравниваем реальный интервал с текущей оценкой. 
   if(interval<reference*7/10||interval>reference*13/10){senseNow.flags|=16;if(mode==FOLLOW)halt(3);return;} // При резком нарушении периода снимаем управление вместо слепой коммутации. 
@@ -238,6 +242,7 @@ void dumpSense(){ // Объявляем выдачу статистики ком
 } // Завершаем выдачу диагностики компаратора.
 void report(){ // Объявляем печать настроек и состояния при отключённом мосте. 
  if(mode!=IDLE&&mode!=COAST){Serial.println(F("Сначала остановите двигатель командой s."));return;} // Не задерживаем работающую коммутацию длинным выводом. 
+ Serial.println(F("Опрос ШИМ: ожидание плато, до 32 проверок.")); // Показываем редакцию исправленного опроса в начале справки.
  Serial.print(F("Конечный сектор, мкс="));Serial.println(FINAL_SECTOR_US); // Позволяем проверить новую редакцию и конечную скорость поля до запуска.
  Serial.print(F("Код="));Serial.print(errorCode);Serial.print(F("; пересечений="));Serial.println(goodTotal); // Выводим причину остановки и число найденных переходов. 
  Serial.print(F("Направление="));Serial.print(direction);Serial.print(F("; инверсия="));Serial.println(invert); // Выводим выбранные направление и полярность. 
