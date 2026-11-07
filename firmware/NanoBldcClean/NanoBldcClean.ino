@@ -5,7 +5,7 @@
 // В Ардуино ИДЕ нужно выбрать: Инструменты → Плата → Ардуино Нано → ATmega328P. 
 // Обязательное соединение: виртуальная нейтраль А0 через резистор 1 кОм подключается к Д6. 
 // Пуск с обратной связью — t; тест разгона без неё — o; медленные шаги — j; остановка — s. 
-// Команда d выводит частоту выбега после шести секунд; q печатает состояние; e меняет полярность ЭДС; знаки + и - меняют стартовый ШИМ только при остановке. 
+// Команда g выводит диагностику компаратора; d выводит частоту выбега после шести секунд; q печатает состояние; e меняет полярность ЭДС; знаки + и - меняют стартовый ШИМ только при остановке. 
 // После включения сначала повернуть ручку в ноль; после остановки новый пуск остаётся ручным. 
 // Ручка регулирует мощность, а не заданные обороты; программного измерения тока здесь нет. 
 // Это стендовый вариант: параметры запуска и достаточность паузы ключей проверяются на моторе. 
@@ -59,6 +59,18 @@ uint8_t coastCount=0; // Храним число готовых строк по�
 uint32_t coastOrigin=0,coastSampleDue=0,coastRowDue=0,coastRise=0,coastPeriod=0; // Храним временные метки выборок, строк и переходов ЭДС.
 uint16_t coastPeak=0; // Накапливаем максимальную абсолютную разность фазы У и нейтрали за текущий интервал.
 bool coastArmed=false,coastRiseKnown=false; // Требуем обе полярности сигнала перед регистрацией очередного полного периода.
+const uint8_t SENSE_ROWS=18; // Храним диагностику последних восемнадцати секторов без печати во время коммутации.
+struct SenseRecord{uint16_t tries,samples,ones,firstEdge;uint8_t sector,wanted,flags;}; // Разделяем отсутствие выборок, постоянный уровень и отбраковку перехода.
+SenseRecord senseLog[SENSE_ROWS],senseNow={}; // Выделяем небольшой кольцевой журнал и текущую запись.
+uint8_t senseHead=0,senseCount=0,sensePrevious=0; // Храним позицию журнала, число строк и предыдущий сырой уровень.
+bool senseOpen=false,sensePreviousKnown=false; // Не сохраняем один сектор дважды и отличаем первое чтение от перехода.
+void saveSense(){ // Объявляем завершение диагностической записи перед сменой сектора или отключением.
+ if(!senseOpen)return; // Пропускаем режимы без наблюдения компаратора и уже завершённые записи.
+ if(initialSign)senseNow.flags|=1; // Отмечаем подтверждённый начальный знак.
+ if(crossingFound)senseNow.flags|=2; // Отмечаем принятый переход ЭДС.
+ senseLog[senseHead]=senseNow;senseHead=(senseHead+1)%SENSE_ROWS;if(senseCount<SENSE_ROWS)senseCount++; // Добавляем сектор в кольцевой журнал.
+ senseOpen=false; // Запрещаем повторную запись того же сектора.
+} // Завершаем сохранение диагностики сектора.
 bool dueNow(uint32_t now,uint32_t due){return (int32_t)(now-due)>=0;} // Сравниваем времена с учётом переполнения счётчика микросекунд. 
 void bridgeOff(){ // Объявляем отключение всех силовых выходов. 
  for(uint8_t i=0;i<3;i++){analogWrite(BOTTOM[i],0);digitalWrite(TOP[i],LOW);} // Снимаем ШИМ и команды верхних ключей всех фаз. 
@@ -116,7 +128,7 @@ void dumpCoast(){ // Объявляем вывод измеренного выб
 } // Завершаем вывод журнала выбега.
 void halt(uint8_t code){ // Объявляем остановку с необязательным кодом причины. 
  if(mode==COAST||mode==IDLE){bridgeOff();return;} // Повторная остановка не стирает уже записываемый или готовый выбег.
- bridgeOff(); // Сначала физически снимаем управление мостом. 
+ bridgeOff();saveSense(); // Сначала физически снимаем управление мостом, затем сохраняем последний наблюдавшийся сектор. 
  adcMode(); // Только после снятия управления возвращаем АЦП. 
  beginCoastMeasurement(); // Начинаем измерение только после отключения всех ключей и возврата АЦП.
  offMs=millis();mode=COAST;zeroSeen=false;errorCode=code; // Запускаем паузу выбега и требуем новое возвращение ручки в ноль. 
@@ -135,6 +147,8 @@ void readHandle(){ // Объявляем чтение потенциометра
 } // Завершаем чтение органа управления. 
 void clearDetector(){ // Объявляем очистку фильтра после смены силового вектора. 
  initialSign=false;crossingFound=false;candidateKnown=false;repeats=0; // Сбрасываем признаки текущего сектора, сохраняя историю периодов. 
+ senseNow={};senseNow.sector=vectorIndex+1;senseNow.wanted=((vectorIndex&1)?0:1)^(direction<0)^invert; // Начинаем запись с номером сектора и ожидаемым знаком после пересечения.
+ senseOpen=comparatorActive;sensePreviousKnown=false; // Включаем статистику только при действительном наблюдении компаратора.
 } // Завершаем очистку фильтра. 
 void energize(){ // Объявляем безопасное включение выбранного сектора. 
  for(uint8_t i=0;i<3;i++)analogWrite(BOTTOM[i],0); // Перед изменением фаз выключаем все нижние ключи. 
@@ -155,7 +169,7 @@ void energize(){ // Объявляем безопасное включение �
   Serial.print(F("мкс="));Serial.print(sectorUs);Serial.print(F(" ШИМ="));Serial.println(pwm); // Показываем заданный период сектора и фактическое заполнение для сопоставления со срывом.
  } // Завершаем неблокирующую диагностику принудительного вращения.
 } // Завершаем включение сектора. 
-void stepForward(){vectorIndex=(vectorIndex+(direction>0?1:5))%6;energize();} // Продвигаем силовой вектор на один сектор в выбранном направлении. 
+void stepForward(){saveSense();vectorIndex=(vectorIndex+(direction>0?1:5))%6;energize();} // Продвигаем силовой вектор на один сектор в выбранном направлении. 
 uint32_t medianPeriod(){ // Объявляем медианный фильтр трёх последних интервалов ЭДС. 
  uint32_t a=history[0],b=history[1],c=history[2],t; // Копируем историю во временные переменные. 
  if(a>b){t=a;a=b;b=t;} // Упорядочиваем первую пару. 
@@ -178,22 +192,28 @@ void observeRotor(){ // Объявляем поиск пересечения Э�
  if(blank<180)blank=180; // Ограничиваем минимальную длительность подавления помех. 
  if(blank>800)blank=800; // Ограничиваем максимальную длительность подавления помех. 
  if(age<blank||age>sectorUs*4/5)return; // Не рассматриваем переходные процессы и слишком поздние выборки. 
+ if(senseNow.tries<65535)senseNow.tries++; // Считаем попытки чтения до проверки допустимого плато ШИМ.
+ if((ADCSRA&_BV(ADEN))||!(ADCSRB&_BV(ACME)))senseNow.flags|=32; // Отмечаем неправильное состояние АЦП или мультиплексора при наблюдении.
  uint8_t sign;if(!sampleSign(sign))return; // Получаем знак только при подходящем состоянии ШИМ. 
- uint32_t now=micros(); // Присваиваем короткой выборке временную метку. 
+ uint32_t now=micros(); // Присваиваем короткой выборке временную метку.
+ if(senseNow.samples<65535)senseNow.samples++; // Считаем принятые выборки без переполнения.
+ if(sign&&senseNow.ones<65535)senseNow.ones++; // Считаем единицы; число нулей равно разности счётчиков.
+ if(sensePreviousKnown&&sign!=sensePrevious&&senseNow.firstEdge==0)senseNow.firstEdge=now-startedUs; // Запоминаем первый сырой переход, ещё не считая его достоверным пересечением ЭДС.
+ sensePrevious=sign;sensePreviousKnown=true; // Сохраняем уровень для поиска следующего сырого перехода. 
  if(!candidateKnown||candidateSign!=sign){candidateKnown=true;candidateSign=sign;candidateUs=now;repeats=1;return;} // Начинаем подтверждение нового устойчивого знака. 
  if(repeats<255)repeats++; // Увеличиваем число подтверждений без переполнения. 
  if(repeats<3||now-candidateUs<SIGN_TIME_US)return; // Отбрасываем короткие всплески и случайные одиночные чтения. 
  uint8_t wanted=((vectorIndex&1)?0:1)^(direction<0)^invert; // Вычисляем ожидаемый знак после пересечения с учётом направления и настройки. 
  if(!initialSign){ // Сначала проверяем, что наблюдалась противоположная полярность. 
-  if(sign!=wanted&&now-startedUs<sectorUs*2/5)initialSign=true; // Принимаем исходный знак только до середины сектора. 
+  if(sign!=wanted&&now-startedUs<sectorUs*2/5)initialSign=true;else senseNow.flags|=4; // Принимаем исходный знак только до середины сектора. 
   return; // До подтверждения исходного знака не принимаем пересечение. 
  } // Завершаем проверку исходной полярности. 
  if(sign!=wanted)return; // Ждём перехода к ожидаемому знаку. 
  uint32_t at=candidateUs,offset=at-startedUs; // Используем первую выборку нового знака, компенсируя задержку подтверждения. 
- if(offset<sectorUs/4||offset>sectorUs*3/4)return; // Принимаем пересечение только в центральной половине сектора. 
+ if(offset<sectorUs/4||offset>sectorUs*3/4){senseNow.flags|=8;return;} // Принимаем пересечение только в центральной половине сектора. 
  if(previousCrossKnown){ // При наличии истории проверяем новый полный интервал между пересечениями. 
   uint32_t interval=at-lastCrossUs,reference=mode==FOLLOW?measuredUs:sectorUs; // Сравниваем реальный интервал с текущей оценкой. 
-  if(interval<reference*7/10||interval>reference*13/10){if(mode==FOLLOW)halt(3);return;} // При резком нарушении периода снимаем управление вместо слепой коммутации. 
+  if(interval<reference*7/10||interval>reference*13/10){senseNow.flags|=16;if(mode==FOLLOW)halt(3);return;} // При резком нарушении периода снимаем управление вместо слепой коммутации. 
   history[historyIndex]=interval;historyIndex=(historyIndex+1)%3; // Добавляем новый интервал в кольцевую историю. 
   measuredUs=medianPeriod(); // Получаем устойчивую оценку периода электрического сектора. 
  }else{for(uint8_t i=0;i<3;i++)history[i]=sectorUs;measuredUs=sectorUs;} // Первое пересечение инициализирует историю заданным периодом. 
@@ -205,13 +225,24 @@ void observeRotor(){ // Объявляем поиск пересечения Э�
   if(dueNow(micros(),deadlineUs))halt(5); // Не пытаемся выполнить уже опоздавшую коммутацию. 
  } // Завершаем назначение переключения по ЭДС. 
 } // Завершаем наблюдение положения ротора. 
+void dumpSense(){ // Объявляем выдачу статистики компаратора после отключения моста.
+ if(mode!=IDLE){Serial.println(F("Дождитесь окончания выбега."));return;} // Не задерживаем ни коммутацию, ни измерение выбега длинной таблицей.
+ Serial.println(F("сектор,ожидаемый_знак,попытки,выборки,единицы,первый_фронт_мкс,флаги")); // Даём столбцы для различения причин отсутствия захвата.
+ uint8_t index=(senseHead+SENSE_ROWS-senseCount)%SENSE_ROWS; // Начинаем с наиболее старой из сохранённых записей.
+ for(uint8_t i=0;i<senseCount;i++){ // Выдаём журнал в хронологическом порядке.
+  SenseRecord &r=senseLog[index];Serial.print(r.sector);Serial.print(',');Serial.print(r.wanted);Serial.print(','); // Выводим номер сектора и требуемый конечный знак.
+  Serial.print(r.tries);Serial.print(',');Serial.print(r.samples);Serial.print(',');Serial.print(r.ones);Serial.print(','); // Показываем наличие окна чтения и обоих логических уровней.
+  Serial.print(r.firstEdge);Serial.print(',');Serial.println(r.flags);index=(index+1)%SENSE_ROWS; // Выводим возраст первого сырого фронта и причину отбраковки.
+ } // Завершаем выдачу строк журнала.
+ Serial.println(F("Биты:1=база;2=принят;4=знак/поздняя база;8=время;16=период;32=АЦП/мультиплексор.")); // Расшифровываем суммируемые диагностические флаги.
+} // Завершаем выдачу диагностики компаратора.
 void report(){ // Объявляем печать настроек и состояния при отключённом мосте. 
  if(mode!=IDLE&&mode!=COAST){Serial.println(F("Сначала остановите двигатель командой s."));return;} // Не задерживаем работающую коммутацию длинным выводом. 
  Serial.print(F("Конечный сектор, мкс="));Serial.println(FINAL_SECTOR_US); // Позволяем проверить новую редакцию и конечную скорость поля до запуска.
  Serial.print(F("Код="));Serial.print(errorCode);Serial.print(F("; пересечений="));Serial.println(goodTotal); // Выводим причину остановки и число найденных переходов. 
  Serial.print(F("Направление="));Serial.print(direction);Serial.print(F("; инверсия="));Serial.println(invert); // Выводим выбранные направление и полярность. 
  Serial.print(F("Пусковой ШИМ="));Serial.print(startupPwm);Serial.println(F(" из 255; + и - меняют на 6.")); // Показываем регулируемую мощность до подачи тока.
- Serial.println(F("t — ОС; o — без ОС; j — шаги; s — стоп; d — выбег; q — сведения; r — реверс; e — полярность.")); // Напоминаем команды управления. 
+ Serial.println(F("t — ОС; o — без ОС; j — шаги; s — стоп; d — выбег; g — компаратор; q — сведения; r — реверс; e — полярность.")); // Напоминаем команды управления. 
 } // Завершаем печать состояния. 
 void start(){ // Объявляем ручной пуск с проверкой условий. 
  if(mode!=IDLE)return; // Запрещаем повторный пуск при уже активном управлении или выбеге. 
@@ -219,7 +250,7 @@ void start(){ // Объявляем ручной пуск с проверкой 
  if(!zeroSeen||handleValue<START_HANDLE)return; // Требуем предварительный ноль ручки и последующее увеличение мощности. 
  if(operated&&millis()-offMs<COAST_MS)return; // Не запускаем ротор повторно до завершения минимального выбега. 
  vectorIndex=0;pwm=startupPwm;sectorUs=FIRST_SECTOR_US; // Начинаем с фиксированного сектора и умеренной стартовой мощности. 
- goodTotal=0;errorCode=0;confidence=0;attempts=0;previousCrossKnown=false;traceMs=millis(); // Очищаем результаты предыдущего опыта. 
+ goodTotal=0;errorCode=0;confidence=0;attempts=0;previousCrossKnown=false;traceMs=millis();senseCount=0;senseHead=0; // Очищаем результаты предыдущего опыта. 
  mode=POSITION;enteredMs=millis();operated=true;energize(); // Включаем позиционирование и фиксируем начало опыта. 
  Serial.println(F("Позиционирование ротора.")); // Сообщаем о старте при малом потоке диагностических данных. 
 } // Завершаем ручной запуск. 
@@ -227,7 +258,7 @@ void reverseRequest(){halt(0);direction=-direction;} // Сначала откл�
 void controls(){ // Объявляем обработку команд и кнопки с ограниченным временем выполнения. 
  if(Serial.available()){ // За один проход принимаем не более одного символа команды. 
   char c=Serial.read(); // Получаем следующий символ последовательного порта. 
-  if(c=='s')halt(0);else if(c=='r')reverseRequest();else if(c=='q')report();else if(c=='d')dumpCoast(); // Выполняем основные однобуквенные команды без ожидания конца строки. 
+  if(c=='s')halt(0);else if(c=='r')reverseRequest();else if(c=='q')report();else if(c=='d')dumpCoast();else if(c=='g')dumpSense(); // Выполняем основные однобуквенные команды без ожидания конца строки. 
   else if((c=='t'||c=='o'||c=='j')&&mode==IDLE){launchType=c=='t'?0:(c=='o'?1:2);start();} // Выбираем обычный запуск или отдельный диагностический опыт.
   else if((c=='+'||c=='-')&&mode==IDLE){if(c=='+'&&startupPwm<90)startupPwm+=6;else if(c=='-'&&startupPwm>42)startupPwm-=6;report();} // Меняем стартовую мощность в пределах 42..90 из 255 без автоматического пуска.
   else if(c=='e'&&mode==IDLE){invert=!invert;report();} // Разрешаем изменение полярности только при отключённом мосте. 
