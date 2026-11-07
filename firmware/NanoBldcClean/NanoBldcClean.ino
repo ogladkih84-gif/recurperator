@@ -79,6 +79,7 @@ const float PI_F=3.14159265f,SECTOR_RAD=1.04719755f; // Задаём полны�
 struct AngleSample{uint32_t at;uint16_t phase[3],neutral;float angle;}; // Храним АЦП всех фаз, нейтраль, время и развёрнутый черновой угол по АЦП.
 AngleSample angleLog[ANGLE_SAMPLES]; // Сохраняем исходные данные для диагностики передачи управления командой k.
 bool clippedInputs=false;float fitAdcRms=0,fitAdcPeak=0; // Учитываем нижнее ограничение АЦП и сохраняем ошибку подбора трёхфазной модели.
+uint32_t fitDurationUs=0,fitFinishedUs=0; // Сохраняем длительность расчёта и его завершение относительно отключения моста.
 bool planValid=false; // Отличаем рассчитанный план от пустых или неудачных измерений.
 uint8_t angleCount=0,plannedVector=0; // Храним число снимков и выбранный по ЭДС начальный силовой вектор.
 uint32_t quietStartedUs=0,snapshotDueUs=0,plannedPowerUs=0,firstBoundaryUs=0; // Храним сроки измерения, включения вектора и первого расчётного переключения.
@@ -263,7 +264,7 @@ float wrapAngle(float value){ // Объявляем приведение угл�
 void beginHandover(){ // Объявляем начало измерения положения после принудительной выдержки.
  bridgeOff();saveSense();adcMode(); // Полностью отключаем мост и только затем разрешаем измерение трёх фаз АЦП.
  quietStartedUs=micros();snapshotDueUs=quietStartedUs+QUIET_BLANK_US; // Выдерживаем четыре миллисекунды без мощности перед первым снимком.
- angleCount=0;anglePeriodUs=0;firstDurationUs=0;planValid=false;clippedInputs=false;fitAdcRms=fitAdcPeak=0;mode=MEASURE; // Сбрасываем прежний результат и запрещаем любые силовые векторы на время измерений.
+ angleCount=0;anglePeriodUs=0;firstDurationUs=0;fitDurationUs=fitFinishedUs=0;planValid=false;clippedInputs=false;fitAdcRms=fitAdcPeak=0;mode=MEASURE; // Сбрасываем прежний результат и запрещаем любые силовые векторы на время измерений.
  Serial.println(F("Измерение трёх ЭДС.")); // Обозначаем отдельную фазу выбега, не объявляя успешный захват.
 } // Завершаем начало передачи управления.
 void takeAngleSample(){ // Объявляем симметричное чтение фаз для уменьшения ошибки последовательного АЦП.
@@ -293,27 +294,29 @@ void takeAngleSample(){ // Объявляем симметричное чтен�
 } // Завершаем получение одного снимка.
 bool fitWaveform(uint32_t period,float &outC,float &outS,float &outRms,float &outPeak){ // Объявляем подбор общей гармоники по достоверным отсчётам трёх фаз.
  float omega=direction*SECTOR_RAD*1000/period,step=omega*(SNAPSHOT_GAP_US/1000.0f); // Задаём пробную скорость вблизи принудительной частоты и шаг между кадрами.
- float cs=cosf(step),sn=sinf(step),c=1,q=0,coeffC[ANGLE_SAMPLES],coeffS[ANGLE_SAMPLES]; // Вычисляем тригонометрию один раз на пробную частоту для ограниченного времени расчёта.
- float cc=0,ss=0,cross=0,cy=0,sy=0;uint8_t valid=0; // Накапливаем уравнения только для отсчётов выше нижнего ограничения АЦП.
+ float cs=cosf(step),sn=sinf(step),c=1,q=0;int16_t coeffX[ANGLE_SAMPLES][3],coeffY[ANGLE_SAMPLES][3]; // Вычисляем тригонометрию один раз на пробную частоту для ограниченного времени расчёта.
+ int32_t accCC=0,accSS=0,accCross=0,accCY=0,accSY=0;uint8_t valid=0; // Накапливаем уравнения только для отсчётов выше нижнего ограничения АЦП.
  for(uint8_t j=0;j<ANGLE_SAMPLES;j++){ // Готовим общую временную модель для каждого снимка.
   float actual=(uint32_t)(angleLog[j].at-angleLog[0].at)/1000.0f,nominal=j*(SNAPSHOT_GAP_US/1000.0f),correction=omega*(actual-nominal); // Учитываем небольшой джиттер реального времени относительно равномерного шага.
-  coeffC[j]=c-q*correction;coeffS[j]=q+c*correction; // Корректируем фазу до первого порядка; допуск опоздания ограничен отдельно.
+  int16_t ca=(int16_t)((c-q*correction)*1024),sa=(int16_t)((q+c*correction)*1024); // Корректируем фазу до первого порядка; допуск опоздания ограничен отдельно.
   for(uint8_t phase=0;phase<3;phase++){ // Используем известный сдвиг фаз на сто двадцать электрических градусов.
+   int16_t cp=phase==0?1024:-512,sp=phase==0?0:(phase==1?887:-887); // Задаём фазовые коэффициенты с масштабом тысяча двадцать четыре.
+   int16_t x=((int32_t)ca*cp+(int32_t)sa*sp)/1024,y=((int32_t)sa*cp-(int32_t)ca*sp)/1024; // Один раз считаем коэффициенты каждой фазы целочисленно для обоих проходов.
+   coeffX[j][phase]=x;coeffY[j][phase]=y; // Сохраняем коэффициенты, исключая повторный расчёт при проверке ошибки.
    if(angleLog[j].phase[phase]<=2)continue; // Не считаем обрезанную отрицательную полуволну истинным нулём ЭДС.
-   float cp=phase==0?1:-0.5f,sp=phase==0?0:(phase==1?0.8660254f:-0.8660254f); // Задаём косинус и синус положения фаз У, В, Ш.
-   float x=coeffC[j]*cp+coeffS[j]*sp,y=coeffS[j]*cp-coeffC[j]*sp,z=(int16_t)angleLog[j].phase[phase]-(int16_t)angleLog[j].neutral; // Формируем одно уравнение по измеренной фазе относительно нейтрали.
-   cc+=x*x;ss+=y*y;cross+=x*y;cy+=x*z;sy+=y*z;valid++; // Накапливаем параметры двух неизвестных составляющих гармоники.
+   int16_t z=(int16_t)angleLog[j].phase[phase]-(int16_t)angleLog[j].neutral; // Вычисляем достоверную ЭДС относительно измеренной нейтрали.
+   accCC+=(int32_t)x*x;accSS+=(int32_t)y*y;accCross+=(int32_t)x*y;accCY+=(int32_t)x*z;accSY+=(int32_t)y*z;valid++; // Накапливаем систему без программной арифметики дробных чисел в горячем цикле.
   } // Завершаем уравнения фаз текущего кадра.
   float next=c*cs-q*sn;q=q*cs+c*sn;c=next; // Переходим к следующему номинальному времени без повторных вызовов синуса.
  } // Завершаем накопление системы измерений.
+ float cc=accCC/1048576.0f,ss=accSS/1048576.0f,cross=accCross/1048576.0f,cy=accCY/1024.0f,sy=accSY/1024.0f; // Один раз переводим пять сумм в физический масштаб перед решением системы.
  float det=cc*ss-cross*cross,total=cc+ss; // Проверяем независимость информации об угле и амплитуде.
  if(valid<8||det<0.005f*total*total)return false; // Отвергаем недостаточные или вырожденные измерения.
  outC=(cy*ss-sy*cross)/det;outS=(sy*cc-cy*cross)/det; // Находим амплитудно-фазовые коэффициенты для этой пробной скорости.
  float sumError=0;outPeak=0; // Подготавливаем независимую проверку всех отсчётов, включая обрезанные.
  for(uint8_t j=0;j<ANGLE_SAMPLES;j++){ // Сопоставляем восстановленную гармонику с исходными АЦП.
   for(uint8_t phase=0;phase<3;phase++){ // Проверяем каждую из трёх фаз каждого кадра.
-   float cp=phase==0?1:-0.5f,sp=phase==0?0:(phase==1?0.8660254f:-0.8660254f); // Восстанавливаем положение данной фазы.
-   float x=coeffC[j]*cp+coeffS[j]*sp,y=coeffS[j]*cp-coeffC[j]*sp,predicted=angleLog[j].neutral+outC*x+outS*y; // Предсказываем напряжение фазы относительно земли.
+   float predicted=angleLog[j].neutral+(outC*coeffX[j][phase]+outS*coeffY[j][phase])/1024; // Проверяем модель по уже рассчитанным фазовым коэффициентам без повторной тригонометрии.
    float error=angleLog[j].phase[phase]<=2?(predicted>2?predicted-2:0):predicted-angleLog[j].phase[phase]; // Для нижнего ограничения проверяем не равенство нулю, а совместимость с отсечением.
    sumError+=error*error;if(fabsf(error)>outPeak)outPeak=fabsf(error); // Сохраняем среднюю и максимальную ошибку, не скрывая плохие кадры усреднением.
   } // Завершаем проверку фаз кадра.
@@ -324,6 +327,7 @@ void planFirstVector(){ // Объявляем независимую оценк�
  float displacement=angleLog[ANGLE_SAMPLES-1].angle-angleLog[0].angle; // Используем развёрнутый порядок движения фаз только для проверки направления и наличия движения.
  if(displacement*direction<=0){halt(9);return;} // Не включаем мост при обратном или неопределённом движении.
  if(fabsf(displacement)<PI_F/12){halt(8);return;} // Отбрасываем практически неподвижную картину вместо подбора угла по постоянному напряжению.
+ uint32_t fitStartedUs=micros(); // Начинаем замер фактического времени подбора на Нано.
  float best=1e20f,bestC=0,bestS=0,bestPeak=0;uint32_t bestPeriod=0; // Начинаем ограниченный поиск скорости в окрестности конца разгона.
  for(uint8_t candidate=0;candidate<7;candidate++){ // Проверяем семь частот без неограниченного численного поиска.
   uint32_t period=FINAL_SECTOR_US*(70UL+candidate*10UL)/100;float a,b,rms,peak; // Перебираем периоды от семидесяти до ста тридцати процентов уставки.
@@ -331,6 +335,7 @@ void planFirstVector(){ // Объявляем независимую оценк�
   float bias=(float)period/FINAL_SECTOR_US-1,score=rms*rms+0.15f*bias*bias; // При почти одинаковой ошибке предпочитаем скорость ближе к известной частоте поля.
   if(score<best){best=score;bestC=a;bestS=b;bestPeak=peak;bestPeriod=period;fitAdcRms=rms;} // Сохраняем лучший проверенный вариант, а не последний вычисленный.
  } // Завершаем ограниченный подбор скорости.
+ fitDurationUs=micros()-fitStartedUs;fitFinishedUs=micros()-quietStartedUs; // Сохраняем время подбора даже при последующей остановке по сроку.
  if(!bestPeriod){halt(8);return;} // Не подаём мощность, если подходящую модель определить не удалось.
  float amplitude=sqrtf(bestC*bestC+bestS*bestS);fitAdcPeak=bestPeak; // Получаем амплитуду общей ЭДС и наибольшую ошибку исходных отсчётов.
  if(amplitude<8){halt(7);return;} // Не используем угол слабой или вырожденной гармоники.
@@ -364,6 +369,7 @@ void dumpAngles(){ // Объявляем выдачу исходных сним�
   Serial.print(',');Serial.print(r.neutral);Serial.print(',');Serial.print((int16_t)(r.angle*1800/PI_F)); // Добавляем нейтраль и черновой угол по АЦП; при обрезке он используется лишь для проверки направления.
   Serial.print(',');if(anglePeriodUs){float model=angleLog[0].angle+wrapAngle(angleIntercept-angleLog[0].angle)+angleSlope*((uint32_t)(r.at-angleLog[0].at)/1000.0f);Serial.println((int16_t)(model*1800/PI_F));}else Serial.println(F("нет")); // Показываем восстановленный угол отдельно, не выдавая черновое значение за результат модели.
  } // Завершаем выдачу исходных снимков.
+ Serial.print(F("Расчёт, мкс="));Serial.print(fitDurationUs);Serial.print(F("; конец от отключения, мкс="));Serial.println(fitFinishedUs); // Позволяем отличить медленный расчёт от запоздавшего снимка и срока включения.
  Serial.print(F("Период сектора, мкс="));Serial.print(anglePeriodUs);Serial.print(F("; RMS, 0.1АЦП="));Serial.print((uint16_t)(fitAdcRms*10));Serial.print(F("; обрезка="));Serial.println(clippedInputs); // Показываем измеренную скорость и качество аппроксимации.
  if(!planValid){Serial.println(F("План включения не сформирован."));return;} // Не выдаём старый или нулевой вектор за успешное планирование.
  Serial.print(F("Выбег до включения, мкс="));Serial.println((uint32_t)(plannedPowerUs-quietStartedUs)); // Позволяем оценить реальную длительность расчёта на процессоре Nano.
@@ -403,7 +409,7 @@ void start(){ // Объявляем ручной пуск с проверкой 
  if(!zeroSeen||handleValue<START_HANDLE)return; // Требуем предварительный ноль ручки и последующее увеличение мощности. 
  if(operated&&millis()-offMs<COAST_MS)return; // Не запускаем ротор повторно до завершения минимального выбега. 
  vectorIndex=0;pwm=startupPwm;sectorUs=FIRST_SECTOR_US; // Начинаем с фиксированного сектора и умеренной стартовой мощности. 
- goodTotal=0;errorCode=0;confidence=0;angleCount=0;anglePeriodUs=0;firstDurationUs=0;planValid=false;clippedInputs=false;fitAdcRms=fitAdcPeak=0;previousCrossKnown=false;traceMs=millis();senseCount=0;senseHead=0; // Очищаем результаты предыдущего опыта.
+ goodTotal=0;errorCode=0;confidence=0;angleCount=0;anglePeriodUs=0;firstDurationUs=0;fitDurationUs=fitFinishedUs=0;planValid=false;clippedInputs=false;fitAdcRms=fitAdcPeak=0;previousCrossKnown=false;traceMs=millis();senseCount=0;senseHead=0; // Очищаем результаты предыдущего опыта.
  mode=POSITION;enteredMs=millis();operated=true;energize(); // Включаем позиционирование и фиксируем начало опыта. 
  Serial.println(F("Позиционирование ротора.")); // Сообщаем о старте при малом потоке диагностических данных. 
 } // Завершаем ручной запуск. 

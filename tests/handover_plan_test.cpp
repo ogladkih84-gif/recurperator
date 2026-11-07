@@ -25,5 +25,17 @@ int main(){
   assert(std::abs(wrapAngle(atBoundary-center-sign*M_PI/6))<M_PI/60);
   for(int ph=0;ph<3;ph++)assert(!output[TOP[ph]]&&!output[BOTTOM[ph]]);
  }
+ // Реальная серия пользователя: модель должна пройти проверку до контроля срока.
+ const uint16_t recorded[8][6]={{4242,22,24,0,11,643},{8246,16,28,0,11,852},{12254,11,31,0,8,995},{16252,4,30,0,7,1129},{20248,0,28,0,4,1200},{24244,0,25,0,0,1200},{28250,0,28,0,4,1200},{32246,0,30,5,8,1289}};
+ direction=1;clockUs+=100000;quietStartedUs=micros();mode=MEASURE;
+ angleCount=8;firstDurationUs=0;planValid=false;
+ for(int j=0;j<8;j++){
+  auto &r=angleLog[j];r.at=quietStartedUs+recorded[j][0];
+  for(int ph=0;ph<3;ph++)r.phase[ph]=recorded[j][ph+1];
+  r.neutral=recorded[j][4];r.angle=recorded[j][5]*PI_F/1800;
+ }
+ clockUs=quietStartedUs+33000;planFirstVector();
+ assert(mode==WAIT_VECTOR&&planValid&&anglePeriodUs==22000&&fitAdcRms<1);
+ Serial.log.clear();mode=IDLE;dumpAngles();assert(Serial.log.find("Расчёт, мкс=")!=std::string::npos);
  std::cout<<"PASS: 144 initial electrical angles, both directions, correct max/min phase vector, 30-degree boundary timing, no power during planning\n";
 }
