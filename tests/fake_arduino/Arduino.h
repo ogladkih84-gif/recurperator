@@ -51,8 +51,8 @@ inline int analogRead(int p){clockUs+=104;return adcInput[p];}
 inline void analogReference(int){}
 inline long map(long x,long a,long b,long c,long d){return (x-a)*(d-c)/(b-a)+c;}
 struct SerialMock {
-  std::string log;
-  void begin(int){} int available(){return 0;} char read(){return 0;}
+  std::string log,rx;
+  void begin(int){} int available(){return rx.size();} char read(){char c=rx.front();rx.erase(0,1);return c;}
   void print(const char *v){log+=v;}
   void print(char v){log+=v;}
   template<class T> void print(T v){log+=std::to_string(v);}

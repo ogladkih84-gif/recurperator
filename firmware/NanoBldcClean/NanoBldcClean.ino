@@ -4,8 +4,8 @@
 // Файл sketch.yaml рядом со скетчем выбирает Нано по умолчанию для командной утилиты Ардуино. 
 // В Ардуино ИДЕ нужно выбрать: Инструменты → Плата → Ардуино Нано → ATmega328P. 
 // Обязательное соединение: виртуальная нейтраль А0 через резистор 1 кОм подключается к Д6. 
-// Пуск выполняется командой t; остановка — s; реверс следующего пуска — r или кнопка Д8. 
-// Команда q печатает состояние только при отключённом мосте; e меняет полярность поиска ЭДС. 
+// Пуск с обратной связью — t; тест разгона без неё — o; медленные шаги — j; остановка — s. 
+// Команда q печатает состояние; e меняет полярность ЭДС; знаки + и - меняют стартовый ШИМ только при остановке. 
 // После включения сначала повернуть ручку в ноль; после остановки новый пуск остаётся ручным. 
 // Ручка регулирует мощность, а не заданные обороты; программного измерения тока здесь нет. 
 // Это стендовый вариант: параметры запуска и достаточность паузы ключей проверяются на моторе. 
@@ -25,17 +25,19 @@ const uint8_t PHASE[3]={3,2,1}; // Задаём номера аналоговы�
 const uint8_t BUTTON=8,NEUTRAL=6,HANDLE=A4; // Назначаем кнопку, положительный вход компаратора и потенциометр. 
 const uint8_t DRIVE[6][3]={{0,1,2},{0,2,1},{1,2,0},{1,0,2},{2,0,1},{2,1,0}}; // Для каждого сектора задаём верхнюю, нижнюю и свободную фазу. 
 const uint16_t DEAD_TIME_US=120; // Задаём исходную паузу закрывания ключей; её достаточность нужно измерить. 
-const uint16_t POSITION_MS=320; // Задаём время начального позиционирования неподвижного ротора. 
-const uint32_t FIRST_SECTOR_US=24000,FINAL_SECTOR_US=5000; // Задаём начальную и конечную длительности принудительного сектора. 
+const uint16_t POSITION_MS=600; // Задаём время начального позиционирования неподвижного ротора. 
+const uint32_t FIRST_SECTOR_US=100000,FINAL_SECTOR_US=10000; // Задаём начальную и конечную длительности принудительного сектора. 
 const uint32_t SHORTEST_US=1800,LONGEST_US=50000; // Ограничиваем допустимый период работы по обратной связи. 
 const uint8_t INITIAL_PWM=54,MAXIMUM_PWM=140; // Ограничиваем начальное и максимальное заполнение отсчётами из 255. 
 const uint16_t ZERO_HANDLE=35,START_HANDLE=75; // Задаём отдельные пороги остановки и разрешения пуска для ручки. 
 const uint16_t COAST_MS=6000; // Задаём минимальную паузу выбега; она не доказывает полную остановку ротора. 
 const uint8_t CLEAN_SECTORS=9; // Требуем девять последовательных подходящих секторов перед захватом. 
 const uint16_t SIGN_TIME_US=72; // Требуем устойчивый знак компаратора в течение нескольких периодов ШИМ. 
-enum Mode:uint8_t {IDLE,POSITION,ACCELERATE,ACQUIRE,FOLLOW,COAST}; // Объявляем состояния алгоритма. 
+enum Mode:uint8_t {IDLE,POSITION,ACCELERATE,ACQUIRE,FOLLOW,COAST,TEST_RUN,JOG}; // Объявляем состояния алгоритма. 
 Mode mode=IDLE; // После включения оставляем мост отключённым. 
-uint8_t vectorIndex=0,pwm=INITIAL_PWM,requestedPwm=INITIAL_PWM; // Храним текущий сектор и значения заполнения. 
+uint8_t vectorIndex=0,pwm=INITIAL_PWM,requestedPwm=INITIAL_PWM,startupPwm=INITIAL_PWM; // Храним текущий сектор и значения заполнения. 
+uint8_t launchType=0,jogSteps=0; // Выбираем обычный пуск, тест без ЭДС или медленную пошаговую проверку.
+uint32_t testStartedMs=0; // Ограничиваем время принудительного вращения без обратной связи.
 int8_t direction=1; // Задаём направление обхода таблицы; знак меняется только при отключении моста. 
 bool invert=false,zeroSeen=false,comparatorActive=false,operated=false; // Храним настройку полярности и признаки готовности. 
 uint32_t enteredMs=0,startedUs=0,deadlineUs=0,sectorUs=FIRST_SECTOR_US; // Храним метки состояния, сектора и следующего переключения. 
@@ -77,8 +79,8 @@ void readHandle(){ // Объявляем чтение потенциометра
  uint8_t saved=ADCSRA;ADCSRA=(saved&(uint8_t)~7)|_BV(ADPS2)|_BV(ADPS0); // Выбираем делитель АЦП 32 для короткого измерения. 
  analogRead(HANDLE);handleValue=analogRead(HANDLE); // Отбрасываем первое преобразование и сохраняем второе. 
  ADCSRA=saved; // Возвращаем прежнюю настройку АЦП. 
- requestedPwm=INITIAL_PWM; // По умолчанию сохраняем минимальное рабочее заполнение. 
- if(handleValue>START_HANDLE)requestedPwm=map(handleValue,START_HANDLE,1023,INITIAL_PWM,MAXIMUM_PWM); // Переводим положение ручки в желаемую мощность. 
+ requestedPwm=startupPwm; // По умолчанию сохраняем минимальное рабочее заполнение. 
+ if(handleValue>START_HANDLE)requestedPwm=map(handleValue,START_HANDLE,1023,startupPwm,MAXIMUM_PWM); // Переводим положение ручки в желаемую мощность. 
  if(restore)sensingMode(); // Возвращаем компаратор на свободную фазу, если он был включён. 
  handleMs=millis(); // Запоминаем время чтения ручки. 
  if(handleValue<=ZERO_HANDLE)zeroSeen=true; // Отмечаем явное возвращение ручки в ноль. 
@@ -155,14 +157,15 @@ void report(){ // Объявляем печать настроек и состо
  if(mode!=IDLE&&mode!=COAST){Serial.println(F("Сначала остановите двигатель командой s."));return;} // Не задерживаем работающую коммутацию длинным выводом. 
  Serial.print(F("Код="));Serial.print(errorCode);Serial.print(F("; пересечений="));Serial.println(goodTotal); // Выводим причину остановки и число найденных переходов. 
  Serial.print(F("Направление="));Serial.print(direction);Serial.print(F("; инверсия="));Serial.println(invert); // Выводим выбранные направление и полярность. 
- Serial.println(F("t — пуск; s — стоп; r — реверс; q — сведения; e — полярность.")); // Напоминаем команды управления. 
+ Serial.print(F("Пусковой ШИМ="));Serial.print(startupPwm);Serial.println(F(" из 255; + и - меняют на 6.")); // Показываем регулируемую мощность до подачи тока.
+ Serial.println(F("t — ОС; o — без ОС; j — шаги; s — стоп; q — сведения; r — реверс; e — полярность.")); // Напоминаем команды управления. 
 } // Завершаем печать состояния. 
 void start(){ // Объявляем ручной пуск с проверкой условий. 
  if(mode!=IDLE)return; // Запрещаем повторный пуск при уже активном управлении или выбеге. 
  readHandle(); // Перед стартом получаем актуальное положение потенциометра. 
  if(!zeroSeen||handleValue<START_HANDLE)return; // Требуем предварительный ноль ручки и последующее увеличение мощности. 
  if(operated&&millis()-offMs<COAST_MS)return; // Не запускаем ротор повторно до завершения минимального выбега. 
- vectorIndex=0;pwm=INITIAL_PWM;sectorUs=FIRST_SECTOR_US; // Начинаем с фиксированного сектора и умеренной стартовой мощности. 
+ vectorIndex=0;pwm=startupPwm;sectorUs=FIRST_SECTOR_US; // Начинаем с фиксированного сектора и умеренной стартовой мощности. 
  goodTotal=0;errorCode=0;confidence=0;attempts=0;previousCrossKnown=false; // Очищаем результаты предыдущего опыта. 
  mode=POSITION;enteredMs=millis();operated=true;energize(); // Включаем позиционирование и фиксируем начало опыта. 
  Serial.println(F("Позиционирование ротора.")); // Сообщаем о старте при малом потоке диагностических данных. 
@@ -171,7 +174,9 @@ void reverseRequest(){halt(0);direction=-direction;} // Сначала откл�
 void controls(){ // Объявляем обработку команд и кнопки с ограниченным временем выполнения. 
  if(Serial.available()){ // За один проход принимаем не более одного символа команды. 
   char c=Serial.read(); // Получаем следующий символ последовательного порта. 
-  if(c=='s')halt(0);else if(c=='t')start();else if(c=='r')reverseRequest();else if(c=='q')report(); // Выполняем основные однобуквенные команды без ожидания конца строки. 
+  if(c=='s')halt(0);else if(c=='r')reverseRequest();else if(c=='q')report(); // Выполняем основные однобуквенные команды без ожидания конца строки. 
+  else if((c=='t'||c=='o'||c=='j')&&mode==IDLE){launchType=c=='t'?0:(c=='o'?1:2);start();} // Выбираем обычный запуск или отдельный диагностический опыт.
+  else if((c=='+'||c=='-')&&mode==IDLE){if(c=='+'&&startupPwm<90)startupPwm+=6;else if(c=='-'&&startupPwm>42)startupPwm-=6;report();} // Меняем стартовую мощность в пределах 42..90 из 255 без автоматического пуска.
   else if(c=='e'&&mode==IDLE){invert=!invert;report();} // Разрешаем изменение полярности только при отключённом мосте. 
  } // Завершаем обработку последовательного порта. 
  bool pressed=digitalRead(BUTTON);uint32_t now=millis(); // Получаем состояние кнопки и текущее время. 
@@ -201,15 +206,25 @@ void loop(){ // Объявляем основной неблокирующий �
  if(mode==COAST){if(ms-offMs>=COAST_MS)mode=IDLE;return;} // Выдерживаем выбег, не выполняя автоматического повторного запуска. 
  if(mode==POSITION){ // Удерживаем начальный вектор перед разгоном. 
   if(handleValue<=ZERO_HANDLE){halt(0);return;} // Нулевая ручка прекращает позиционирование. 
-  if(ms-enteredMs>=POSITION_MS){mode=ACCELERATE;stepForward();deadlineUs=startedUs+sectorUs-DEAD_TIME_US;} // После выдержки начинаем движение поля с первого реального шага. 
+  if(ms-enteredMs>=POSITION_MS){mode=launchType==2?JOG:ACCELERATE;if(mode==JOG){sectorUs=250000;jogSteps=1;}stepForward();deadlineUs=startedUs+sectorUs-DEAD_TIME_US;} // После выдержки начинаем движение поля с первого реального шага. 
   return; // До окончания позиционирования другие режимы не выполняем. 
  } // Завершаем обработку позиционирования. 
  if(mode==ACCELERATE&&dueNow(now,deadlineUs)){ // Ускоряем поле только по завершении предыдущего сектора. 
   if(now-deadlineUs>sectorUs/6){halt(1);return;} // Отключаем мост при существенном опоздании программы. 
-  sectorUs=sectorUs*995/1000; // Постепенно сокращаем каждый сектор на половину процента без скачка частоты. 
-  if(sectorUs<=FINAL_SECTOR_US){sectorUs=FINAL_SECTOR_US;mode=ACQUIRE;sensingMode();} // После разгона начинаем наблюдение ЭДС на постоянной частоте. 
+  sectorUs=sectorUs*990/1000; // Уменьшаем сектор на один процент, начиная с гораздо меньшей скорости поля. 
+  if(sectorUs<=FINAL_SECTOR_US){sectorUs=FINAL_SECTOR_US;if(launchType==1){mode=TEST_RUN;testStartedMs=ms;}else{mode=ACQUIRE;sensingMode();}} // После разгона начинаем наблюдение ЭДС на постоянной частоте. 
   stepForward();deadlineUs=startedUs+sectorUs-DEAD_TIME_US;return; // Коммутируем и назначаем следующий принудительный сектор. 
  } // Завершаем очередной шаг разгона. 
+ if(mode==TEST_RUN||mode==JOG){ // Выполняем ограниченный диагностический опыт без компаратора и захвата ЭДС.
+  if(mode==TEST_RUN&&ms-testStartedMs>=3000){halt(0);return;} // Завершаем принудительное вращение через три секунды после разгона.
+  if(dueNow(micros(),deadlineUs)){ // Переключаем очередной тестовый вектор по таймеру.
+   if(micros()-deadlineUs>sectorUs/6){halt(1);return;} // Отключаем мост при недопустимом опоздании даже в диагностике.
+   if(mode==JOG&&jogSteps>=12){halt(0);return;} // Завершаем двенадцать медленных перемещений вместо длительного удержания током.
+   stepForward();if(mode==COAST)return;deadlineUs=startedUs+sectorUs-DEAD_TIME_US; // Выполняем шаг и учитываем остановку по потенциометру.
+   if(mode==JOG){jogSteps++;Serial.print(F("Шаг="));Serial.println(vectorIndex+1);} // Печатаем номер сектора только при медленной диагностике.
+  } // Завершаем обслуживание тестового сектора.
+  return; // Диагностика не выполняет поиск ЭДС и не может завершиться кодом отсутствия захвата.
+ } // Завершаем ограниченный тест без обратной связи.
  if(mode==ACQUIRE){ // Продолжаем принудительную коммутацию, проверяя пригодность ЭДС. 
   observeRotor();if(mode!=ACQUIRE)return; // Проверяем пересечение и учитываем возможное аварийное отключение. 
   if(dueNow(micros(),deadlineUs)){ // Анализируем полностью завершившийся сектор. 
