@@ -5,7 +5,7 @@ void runCoast(bool decay){
  uint64_t origin=clockUs,end=origin+6010000;
  while(clockUs<end){
   adcInput[A0]=500;
-  adcInput[A3]=900;adcInput[A1]=(decay&&clockUs-origin>2000000)?500:((clockUs-origin)%30000<15000?470:530);
+  adcInput[A1]=900;adcInput[A3]=(decay&&clockUs-origin>2000000)?500:((clockUs-origin)%30000<15000?470:530);
   loop();
   for(int i=0;i<3;i++)assert(!output[TOP[i]]&&!output[BOTTOM[i]]);
   clockUs+=100;
